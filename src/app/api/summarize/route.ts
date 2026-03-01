@@ -96,13 +96,35 @@ export async function POST(req: Request) {
             if (fs.existsSync(vttPath)) fs.unlinkSync(vttPath);
 
             console.log(`Downloading subtitles for ${videoId}...`);
-            // Run yt-dlp synchronously. Use local .exe on Windows, or assume 'yt-dlp' in PATH on Linux.
+
             const isWindows = process.platform === 'win32';
-            const ytDlpCmd = isWindows ? `"${path.join(process.cwd(), 'yt-dlp.exe')}"` : 'yt-dlp';
+            let ytDlpCmd = '';
+
+            if (isWindows) {
+                // Local development (Windows)
+                ytDlpCmd = `"${path.join(process.cwd(), 'yt-dlp.exe')}"`;
+            } else {
+                // Vercel / Linux Environment
+                // Vercel filesystem is read-only except for /tmp
+                const linuxYtDlpPath = path.join(tempDir, 'yt-dlp');
+
+                // Check if we already downloaded it in this serverless instance
+                if (!fs.existsSync(linuxYtDlpPath)) {
+                    console.log('yt-dlp not found in /tmp. Downloading for Linux environment...');
+                    execSync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${linuxYtDlpPath}`);
+                    execSync(`chmod a+rx ${linuxYtDlpPath}`);
+                    console.log('yt-dlp downloaded and made executable.');
+                }
+                ytDlpCmd = linuxYtDlpPath;
+            }
+
             try {
+                console.log(`Executing yt-dlp command: ${ytDlpCmd}`);
                 execSync(`${ytDlpCmd} --write-auto-sub --sub-lang ja --skip-download -o "${outputTemplate}" "${url}"`, { stdio: 'pipe' });
             } catch (execError: any) {
                 console.error("yt-dlp EXEC ERROR:", execError.message);
+                if (execError.stdout) console.error("Stdout:", execError.stdout.toString());
+                if (execError.stderr) console.error("Stderr:", execError.stderr.toString());
                 ytDlpFailed = true;
             }
 
