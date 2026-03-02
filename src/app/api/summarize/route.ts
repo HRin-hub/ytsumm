@@ -85,6 +85,8 @@ export async function POST(req: Request) {
         let transcriptText = '';
         let ytDlpFailed = false;
 
+        let ytDlpErrorLog = '';
+
         try {
             const url = `https://www.youtube.com/watch?v=${videoId}`;
             // Save to the OS temp directory to avoid cluttering specific project folders
@@ -111,9 +113,13 @@ export async function POST(req: Request) {
                 // Check if we already downloaded it in this serverless instance
                 if (!fs.existsSync(linuxYtDlpPath)) {
                     console.log('yt-dlp not found in /tmp. Downloading for Linux environment...');
-                    execSync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${linuxYtDlpPath}`);
-                    execSync(`chmod a+rx ${linuxYtDlpPath}`);
-                    console.log('yt-dlp downloaded and made executable.');
+                    try {
+                        execSync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${linuxYtDlpPath}`);
+                        execSync(`chmod a+rx ${linuxYtDlpPath}`);
+                        console.log('yt-dlp downloaded and made executable.');
+                    } catch (dlErr: any) {
+                        ytDlpErrorLog += "Download Error: " + dlErr.message + "\n";
+                    }
                 }
                 ytDlpCmd = linuxYtDlpPath;
             }
@@ -123,8 +129,9 @@ export async function POST(req: Request) {
                 execSync(`${ytDlpCmd} --write-auto-sub --sub-lang ja --skip-download -o "${outputTemplate}" "${url}"`, { stdio: 'pipe' });
             } catch (execError: any) {
                 console.error("yt-dlp EXEC ERROR:", execError.message);
-                if (execError.stdout) console.error("Stdout:", execError.stdout.toString());
-                if (execError.stderr) console.error("Stderr:", execError.stderr.toString());
+                ytDlpErrorLog += "Exec Error: " + execError.message + "\n";
+                if (execError.stdout) ytDlpErrorLog += "Stdout: " + execError.stdout.toString() + "\n";
+                if (execError.stderr) ytDlpErrorLog += "Stderr: " + execError.stderr.toString() + "\n";
                 ytDlpFailed = true;
             }
 
@@ -154,10 +161,18 @@ export async function POST(req: Request) {
                 fs.unlinkSync(vttPath);
             } else {
                 ytDlpFailed = true;
+                if (!ytDlpErrorLog) ytDlpErrorLog += "vtt file was not generated.\n";
             }
-        } catch (error) {
+        } catch (error: any) {
             console.error('yt-dlp unexpected error', error);
             ytDlpFailed = true;
+            ytDlpErrorLog += "Unexpected Error: " + error.message + "\n";
+        }
+
+        // Expose error explicitly on Vercel
+        const isWindowsEnv = process.platform === 'win32';
+        if (ytDlpFailed && !isWindowsEnv) {
+            return NextResponse.json({ error: `[システムデバッグ用] 動画から字幕を取得できませんでした。\n${ytDlpErrorLog}` }, { status: 400 });
         }
 
         // 5. Gemini API for Summary & Tags
