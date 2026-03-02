@@ -146,21 +146,75 @@ export async function POST(req: Request) {
                     if (!ytDlpErrorLog) ytDlpErrorLog += "vtt file was not generated.\n";
                 }
             } else {
-                // Vercel / Linux Environment uses youtube-transcript package 
-                console.log(`Downloading subtitles for ${videoId} using youtube-transcript...`);
-                try {
-                    const transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'ja' });
-                    if (transcript && transcript.length > 0) {
-                        const textLines = transcript.map(t => t.text);
-                        transcriptText = textLines.join(' ');
-                    } else {
+                // Vercel / Linux Environment
+                // Use yt-dlp_linux standalone binary which bundles its own Python interpreter
+                // This is different from the yt-dlp zipapp which requires system Python
+                const tempDir2 = process.env.TEMP || process.env.TMPDIR || '/tmp';
+                const linuxYtDlpPath = path.join(tempDir2, 'yt-dlp_linux');
+
+                console.log(`Downloading subtitles for ${videoId} using yt-dlp_linux standalone...`);
+
+                // Clean up old files just in case
+                if (fs.existsSync(vttPath)) fs.unlinkSync(vttPath);
+
+                // Download the standalone binary if not already cached in this instance
+                if (!fs.existsSync(linuxYtDlpPath)) {
+                    console.log('Downloading yt-dlp_linux standalone binary...');
+                    try {
+                        execSync(
+                            `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o ${linuxYtDlpPath}`,
+                            { stdio: 'pipe', timeout: 60000 }
+                        );
+                        execSync(`chmod a+rx ${linuxYtDlpPath}`, { stdio: 'pipe' });
+                        console.log('yt-dlp_linux downloaded and made executable.');
+                    } catch (dlErr: any) {
+                        ytDlpErrorLog += "Download Error: " + dlErr.message + "\n";
                         ytDlpFailed = true;
-                        ytDlpErrorLog += "youtube-transcript returned empty array.\n";
                     }
-                } catch (trError: any) {
-                    console.error("youtube-transcript error:", trError.message);
+                }
+
+                if (!ytDlpFailed) {
+                    try {
+                        execSync(
+                            `${linuxYtDlpPath} --write-auto-sub --sub-lang ja --skip-download -o "${outputTemplate}" "${url}"`,
+                            { stdio: 'pipe', timeout: 60000 }
+                        );
+                    } catch (execError: any) {
+                        console.error("yt-dlp_linux EXEC ERROR:", execError.message);
+                        ytDlpErrorLog += "Exec Error: " + execError.message + "\n";
+                        if (execError.stdout) ytDlpErrorLog += "Stdout: " + execError.stdout.toString() + "\n";
+                        if (execError.stderr) ytDlpErrorLog += "Stderr: " + execError.stderr.toString() + "\n";
+                        ytDlpFailed = true;
+                    }
+                }
+
+                if (!ytDlpFailed && fs.existsSync(vttPath)) {
+                    const vttContent = fs.readFileSync(vttPath, 'utf8');
+                    const lines = vttContent.split('\n');
+                    const textLines: string[] = [];
+
+                    for (let i = 0; i < lines.length; i++) {
+                        const line = lines[i].trim();
+                        if (line === '' || line.startsWith('WEBVTT') || line.startsWith('Kind:') || line.startsWith('Language:') || line.includes('-->')) {
+                            continue;
+                        }
+                        const cleanLine = line.replace(/<[^>]+>/g, '').trim();
+                        if (cleanLine) textLines.push(cleanLine);
+                    }
+
+                    const uniqueLines: string[] = [];
+                    for (let i = 0; i < textLines.length; i++) {
+                        if (i === 0 || textLines[i] !== textLines[i - 1]) {
+                            uniqueLines.push(textLines[i]);
+                        }
+                    }
+                    transcriptText = uniqueLines.join(' ');
+
+                    // Cleanup
+                    fs.unlinkSync(vttPath);
+                } else if (!ytDlpFailed) {
                     ytDlpFailed = true;
-                    ytDlpErrorLog += "Transcription Error: " + trError.message + "\n";
+                    ytDlpErrorLog += "vtt file was not generated.\n";
                 }
             }
 
