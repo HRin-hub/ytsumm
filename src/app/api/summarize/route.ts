@@ -5,6 +5,7 @@ import { headers } from 'next/headers';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { YoutubeTranscript } from 'youtube-transcript';
 
 const DAILY_LIMIT = 20;
 
@@ -94,77 +95,77 @@ export async function POST(req: Request) {
             const outputTemplate = path.join(tempDir, `${videoId}.%(ext)s`);
             const vttPath = path.join(tempDir, `${videoId}.ja.vtt`);
 
-            // Clean up old files just in case
-            if (fs.existsSync(vttPath)) fs.unlinkSync(vttPath);
-
-            console.log(`Downloading subtitles for ${videoId}...`);
-
             const isWindows = process.platform === 'win32';
-            let ytDlpCmd = '';
 
             if (isWindows) {
-                // Local development (Windows)
-                ytDlpCmd = `"${path.join(process.cwd(), 'yt-dlp.exe')}"`;
+                // Local development (Windows) uses yt-dlp.exe
+                console.log(`Downloading subtitles for ${videoId} using yt-dlp.exe...`);
+
+                // Clean up old files just in case
+                if (fs.existsSync(vttPath)) fs.unlinkSync(vttPath);
+
+                let ytDlpCmd = `"${path.join(process.cwd(), 'yt-dlp.exe')}"`;
+
+                try {
+                    console.log(`Executing yt-dlp command: ${ytDlpCmd}`);
+                    execSync(`${ytDlpCmd} --write-auto-sub --sub-lang ja --skip-download -o "${outputTemplate}" "${url}"`, { stdio: 'pipe' });
+                } catch (execError: any) {
+                    console.error("yt-dlp EXEC ERROR:", execError.message);
+                    ytDlpErrorLog += "Exec Error: " + execError.message + "\n";
+                    if (execError.stdout) ytDlpErrorLog += "Stdout: " + execError.stdout.toString() + "\n";
+                    if (execError.stderr) ytDlpErrorLog += "Stderr: " + execError.stderr.toString() + "\n";
+                    ytDlpFailed = true;
+                }
+
+                if (!ytDlpFailed && fs.existsSync(vttPath)) {
+                    const vttContent = fs.readFileSync(vttPath, 'utf8');
+                    const lines = vttContent.split('\n');
+                    const textLines = [];
+
+                    for (let i = 0; i < lines.length; i++) {
+                        const line = lines[i].trim();
+                        if (line === '' || line.startsWith('WEBVTT') || line.startsWith('Kind:') || line.startsWith('Language:') || line.includes('-->')) {
+                            continue;
+                        }
+                        const cleanLine = line.replace(/<[^>]+>/g, '').trim();
+                        if (cleanLine) textLines.push(cleanLine);
+                    }
+
+                    const uniqueLines = [];
+                    for (let i = 0; i < textLines.length; i++) {
+                        if (i === 0 || textLines[i] !== textLines[i - 1]) {
+                            uniqueLines.push(textLines[i]);
+                        }
+                    }
+                    transcriptText = uniqueLines.join(' ');
+
+                    // Cleanup
+                    fs.unlinkSync(vttPath);
+                } else {
+                    ytDlpFailed = true;
+                    if (!ytDlpErrorLog) ytDlpErrorLog += "vtt file was not generated.\n";
+                }
             } else {
-                // Vercel / Linux Environment
-                // Vercel filesystem is read-only except for /tmp
-                const linuxYtDlpPath = path.join(tempDir, 'yt-dlp');
-
-                // Check if we already downloaded it in this serverless instance
-                if (!fs.existsSync(linuxYtDlpPath)) {
-                    console.log('yt-dlp not found in /tmp. Downloading for Linux environment...');
-                    try {
-                        execSync(`curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${linuxYtDlpPath}`);
-                        execSync(`chmod a+rx ${linuxYtDlpPath}`);
-                        console.log('yt-dlp downloaded and made executable.');
-                    } catch (dlErr: any) {
-                        ytDlpErrorLog += "Download Error: " + dlErr.message + "\n";
+                // Vercel / Linux Environment uses youtube-transcript package 
+                console.log(`Downloading subtitles for ${videoId} using youtube-transcript...`);
+                try {
+                    const transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'ja' });
+                    if (transcript && transcript.length > 0) {
+                        const textLines = transcript.map(t => t.text);
+                        transcriptText = textLines.join(' ');
+                    } else {
+                        ytDlpFailed = true;
+                        ytDlpErrorLog += "youtube-transcript returned empty array.\n";
                     }
+                } catch (trError: any) {
+                    console.error("youtube-transcript error:", trError.message);
+                    ytDlpFailed = true;
+                    ytDlpErrorLog += "Transcription Error: " + trError.message + "\n";
                 }
-                ytDlpCmd = linuxYtDlpPath;
             }
 
-            try {
-                console.log(`Executing yt-dlp command: ${ytDlpCmd}`);
-                execSync(`${ytDlpCmd} --write-auto-sub --sub-lang ja --skip-download -o "${outputTemplate}" "${url}"`, { stdio: 'pipe' });
-            } catch (execError: any) {
-                console.error("yt-dlp EXEC ERROR:", execError.message);
-                ytDlpErrorLog += "Exec Error: " + execError.message + "\n";
-                if (execError.stdout) ytDlpErrorLog += "Stdout: " + execError.stdout.toString() + "\n";
-                if (execError.stderr) ytDlpErrorLog += "Stderr: " + execError.stderr.toString() + "\n";
-                ytDlpFailed = true;
-            }
-
-            if (!ytDlpFailed && fs.existsSync(vttPath)) {
-                const vttContent = fs.readFileSync(vttPath, 'utf8');
-                const lines = vttContent.split('\n');
-                const textLines = [];
-
-                for (let i = 0; i < lines.length; i++) {
-                    const line = lines[i].trim();
-                    if (line === '' || line.startsWith('WEBVTT') || line.startsWith('Kind:') || line.startsWith('Language:') || line.includes('-->')) {
-                        continue;
-                    }
-                    const cleanLine = line.replace(/<[^>]+>/g, '').trim();
-                    if (cleanLine) textLines.push(cleanLine);
-                }
-
-                const uniqueLines = [];
-                for (let i = 0; i < textLines.length; i++) {
-                    if (i === 0 || textLines[i] !== textLines[i - 1]) {
-                        uniqueLines.push(textLines[i]);
-                    }
-                }
-                transcriptText = uniqueLines.join(' ');
-
-                // Cleanup
-                fs.unlinkSync(vttPath);
-            } else {
-                ytDlpFailed = true;
-                if (!ytDlpErrorLog) ytDlpErrorLog += "vtt file was not generated.\n";
-            }
         } catch (error: any) {
-            console.error('yt-dlp unexpected error', error);
+            console.error('subtitle fetch unexpected error', error);
             ytDlpFailed = true;
             ytDlpErrorLog += "Unexpected Error: " + error.message + "\n";
         }
@@ -172,19 +173,17 @@ export async function POST(req: Request) {
         // Expose error explicitly on Vercel
         const isWindowsEnv = process.platform === 'win32';
         if (ytDlpFailed && !isWindowsEnv) {
-            return NextResponse.json({ error: `[システムデバッグ用] 動画から字幕を取得できませんでした。\n${ytDlpErrorLog}` }, { status: 400 });
+            return NextResponse.json({ error: `[システムログ] 動画から字幕を取得できませんでした。\n(youtube-transcript error)\n${ytDlpErrorLog}` }, { status: 400 });
         }
 
         // 5. Gemini API for Summary & Tags
-        let prompt = '';
-        if (!ytDlpFailed && transcriptText && transcriptText.trim() !== '') {
-            // Cap at 20000 chars to avoid prompt length limits
-            if (transcriptText.length > 20000) {
-                transcriptText = transcriptText.substring(0, 20000) + '...';
-            }
+        // Cap at 20000 chars to avoid prompt length limits
+        if (transcriptText.length > 20000) {
+            transcriptText = transcriptText.substring(0, 20000) + '...';
+        }
 
-            console.log(`Using text transcript for ${videoId}, length: ${transcriptText.length}`);
-            prompt = `
+        console.log(`Using text transcript for ${videoId}, length: ${transcriptText.length}`);
+        const prompt = `
 以下のYouTube動画の文字起こしを読んで、概要を分かりやすい日本語で段落を分けて詳細に要約してください。
 また、動画内容に合ったハッシュタグ（キーワード）を最大5つ抽出してください。
 以下のJSONフォーマット（JSON文字列のみ）で出力してください。マークダウンの記法などは一切含めないでください。
@@ -197,23 +196,6 @@ export async function POST(req: Request) {
 --- 動画の文字起こし ---
 ${transcriptText}
 `;
-        } else {
-            console.log(`Fallback to native video URL processing for ${videoId}`);
-            // Fallback to Native Gemini Understanding if subtitle fetch failed completely
-            prompt = `
-以下のYouTube動画の内容を確認して、概要を分かりやすい日本語で段落を分けて詳細に要約してください。
-また、動画内容に合ったハッシュタグ（キーワード）を最大5つ抽出してください。
-以下のJSONフォーマット（JSON文字列のみ）で出力してください。マークダウンの記法などは一切含めないでください。
-
-{
-  "summary": "要約テキスト（適度に改行を含める）",
-  "tags": ["タグ1", "タグ2", "タグ3"]
-}
-
----
-動画URL: ${youtubeUrl}
-`;
-        }
 
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
