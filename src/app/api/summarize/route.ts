@@ -147,74 +147,38 @@ export async function POST(req: Request) {
                 }
             } else {
                 // Vercel / Linux Environment
-                // Use yt-dlp_linux standalone binary which bundles its own Python interpreter
-                // This is different from the yt-dlp zipapp which requires system Python
-                const tempDir2 = process.env.TEMP || process.env.TMPDIR || '/tmp';
-                const linuxYtDlpPath = path.join(tempDir2, 'yt-dlp_linux');
-
-                console.log(`Downloading subtitles for ${videoId} using yt-dlp_linux standalone...`);
-
-                // Clean up old files just in case
-                if (fs.existsSync(vttPath)) fs.unlinkSync(vttPath);
-
-                // Download the standalone binary if not already cached in this instance
-                if (!fs.existsSync(linuxYtDlpPath)) {
-                    console.log('Downloading yt-dlp_linux standalone binary...');
-                    try {
-                        execSync(
-                            `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o ${linuxYtDlpPath}`,
-                            { stdio: 'pipe', timeout: 60000 }
-                        );
-                        execSync(`chmod a+rx ${linuxYtDlpPath}`, { stdio: 'pipe' });
-                        console.log('yt-dlp_linux downloaded and made executable.');
-                    } catch (dlErr: any) {
-                        ytDlpErrorLog += "Download Error: " + dlErr.message + "\n";
-                        ytDlpFailed = true;
-                    }
-                }
-
-                if (!ytDlpFailed) {
-                    try {
-                        execSync(
-                            `${linuxYtDlpPath} --write-auto-sub --sub-lang ja --skip-download -o "${outputTemplate}" "${url}"`,
-                            { stdio: 'pipe', timeout: 60000 }
-                        );
-                    } catch (execError: any) {
-                        console.error("yt-dlp_linux EXEC ERROR:", execError.message);
-                        ytDlpErrorLog += "Exec Error: " + execError.message + "\n";
-                        if (execError.stdout) ytDlpErrorLog += "Stdout: " + execError.stdout.toString() + "\n";
-                        if (execError.stderr) ytDlpErrorLog += "Stderr: " + execError.stderr.toString() + "\n";
-                        ytDlpFailed = true;
-                    }
-                }
-
-                if (!ytDlpFailed && fs.existsSync(vttPath)) {
-                    const vttContent = fs.readFileSync(vttPath, 'utf8');
-                    const lines = vttContent.split('\n');
-                    const textLines: string[] = [];
-
-                    for (let i = 0; i < lines.length; i++) {
-                        const line = lines[i].trim();
-                        if (line === '' || line.startsWith('WEBVTT') || line.startsWith('Kind:') || line.startsWith('Language:') || line.includes('-->')) {
-                            continue;
-                        }
-                        const cleanLine = line.replace(/<[^>]+>/g, '').trim();
-                        if (cleanLine) textLines.push(cleanLine);
-                    }
-
-                    const uniqueLines: string[] = [];
-                    for (let i = 0; i < textLines.length; i++) {
-                        if (i === 0 || textLines[i] !== textLines[i - 1]) {
-                            uniqueLines.push(textLines[i]);
-                        }
-                    }
-                    transcriptText = uniqueLines.join(' ');
-
-                    // Cleanup
-                    fs.unlinkSync(vttPath);
-                } else if (!ytDlpFailed) {
+                // Use Supadata.ai API to fetch subtitles – no bot detection issues
+                console.log(`Fetching subtitles for ${videoId} via Supadata.ai API...`);
+                const supadataApiKey = process.env.SUPADATA_API_KEY;
+                if (!supadataApiKey) {
                     ytDlpFailed = true;
-                    ytDlpErrorLog += "vtt file was not generated.\n";
+                    ytDlpErrorLog += "SUPADATA_API_KEY is not set.\n";
+                } else {
+                    try {
+                        const supadataRes = await fetch(
+                            `https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}&lang=ja&text=true`,
+                            { headers: { 'x-api-key': supadataApiKey } }
+                        );
+                        if (!supadataRes.ok) {
+                            const errText = await supadataRes.text();
+                            console.error("Supadata API error:", supadataRes.status, errText);
+                            ytDlpErrorLog += `Supadata API error ${supadataRes.status}: ${errText}\n`;
+                            ytDlpFailed = true;
+                        } else {
+                            const supadataData = await supadataRes.json();
+                            if (supadataData && supadataData.content) {
+                                transcriptText = supadataData.content;
+                                console.log(`Supadata transcript fetched, length: ${transcriptText.length}`);
+                            } else {
+                                ytDlpFailed = true;
+                                ytDlpErrorLog += "Supadata API returned empty transcript.\n";
+                            }
+                        }
+                    } catch (apiErr: any) {
+                        console.error("Supadata API call error:", apiErr.message);
+                        ytDlpFailed = true;
+                        ytDlpErrorLog += "API Call Error: " + apiErr.message + "\n";
+                    }
                 }
             }
 
@@ -224,10 +188,10 @@ export async function POST(req: Request) {
             ytDlpErrorLog += "Unexpected Error: " + error.message + "\n";
         }
 
-        // Expose error explicitly on Vercel
+        // If transcript fetch failed on Vercel, return a clear error
         const isWindowsEnv = process.platform === 'win32';
         if (ytDlpFailed && !isWindowsEnv) {
-            return NextResponse.json({ error: `[システムログ] 動画から字幕を取得できませんでした。\n(youtube-transcript error)\n${ytDlpErrorLog}` }, { status: 400 });
+            return NextResponse.json({ error: `この動画の字幕を取得できませんでした。字幕・自動字幕が無効な動画は対応していません。\n(detail: ${ytDlpErrorLog})` }, { status: 400 });
         }
 
         // 5. Gemini API for Summary & Tags
